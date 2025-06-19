@@ -19,21 +19,23 @@ from .utils.logger import setup_logger, main_logger
 class DocumentProcessor:
     """Main document processing orchestrator."""
     
-    def __init__(self, output_dir: Path, verbose: bool = False):
+    def __init__(self, output_dir: Path, verbose: bool = False, enable_language_splitting: bool = True):
         """
         Initialize document processor.
         
         Args:
             output_dir: Output directory for results
             verbose: Enable verbose logging
+            enable_language_splitting: Enable language splitting
         """
         self.output_dir = output_dir
         self.verbose = verbose
+        self.enable_language_splitting = enable_language_splitting
         
         # Initialize processors
         self.pdf_processor = PDFProcessor()
-        self.ocr_processor = UkrainianOCR()
-        self.table_extractor = TableExtractor()
+        self.ocr_processor = UkrainianOCR(enable_language_splitting=self.enable_language_splitting)
+        self.table_extractor = TableExtractor(enable_language_splitting=self.enable_language_splitting)
         
         # Setup logging
         log_level = 'DEBUG' if verbose else 'INFO'
@@ -187,10 +189,13 @@ def cli(ctx, verbose):
               help='Table extraction method')
 @click.option('--confidence-threshold', type=int, default=60,
               help='Minimum OCR confidence threshold (0-100)')
+@click.option('--disable-language-splitting', is_flag=True,
+              help='Disable automatic language splitting of extracted text')
 @click.pass_context
-def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshold):
+def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshold, disable_language_splitting):
     """
     Process a single PDF file to extract text and tables.
+    Creates separate Ukrainian and English output files unless --disable-language-splitting is used.
     
     PDF_FILE: Path to the PDF file to process
     """
@@ -202,10 +207,14 @@ def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshol
     TABLE_CONFIG['detection_method'] = table_method
     
     try:
-        processor = DocumentProcessor(output, verbose)
+        processor = DocumentProcessor(output, verbose, enable_language_splitting=not disable_language_splitting)
         
         click.echo(f"Processing: {pdf_file}")
         click.echo(f"Output directory: {output}")
+        if not disable_language_splitting:
+            click.echo("Language splitting: Enabled (Ukrainian and English files will be created)")
+        else:
+            click.echo("Language splitting: Disabled")
         
         result = processor.process_single_file(pdf_file)
         
@@ -216,6 +225,13 @@ def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshol
             click.echo(f"  Total characters: {result['ocr_results']['total_characters']:,}")
             click.echo(f"  Total words: {result['ocr_results']['total_words']:,}")
             click.echo(f"  Tables found: {result['table_results']['tables_found']}")
+            
+            # Show language breakdown if enabled
+            if not disable_language_splitting and 'language_breakdown' in result.get('ocr_results', {}):
+                lang_breakdown = result['ocr_results']['language_breakdown']
+                click.echo(f"  Ukrainian characters: {lang_breakdown.get('ukrainian_characters', 0):,}")
+                click.echo(f"  English characters: {lang_breakdown.get('english_characters', 0):,}")
+            
             click.echo(f"  Processing time: {result['processing_time']:.2f}s")
             click.echo(f"  Results saved to: {result['output_directory']}")
         else:
@@ -240,8 +256,10 @@ def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshol
               help='Table extraction method')
 @click.option('--confidence-threshold', type=int, default=60,
               help='Minimum OCR confidence threshold (0-100)')
+@click.option('--disable-language-splitting', is_flag=True,
+              help='Disable automatic language splitting of extracted text')
 @click.pass_context
-def batch(ctx, input_dir, output, pattern, recursive, table_method, confidence_threshold):
+def batch(ctx, input_dir, output, pattern, recursive, table_method, confidence_threshold, disable_language_splitting):
     """
     Process multiple PDF files in a directory.
     
@@ -268,7 +286,7 @@ def batch(ctx, input_dir, output, pattern, recursive, table_method, confidence_t
         click.echo(f"Found {len(pdf_files)} PDF files")
         click.echo(f"Output directory: {output}")
         
-        processor = DocumentProcessor(output, verbose)
+        processor = DocumentProcessor(output, verbose, enable_language_splitting=not disable_language_splitting)
         results = processor.process_batch(pdf_files)
         
         # Print summary

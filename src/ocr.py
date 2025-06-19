@@ -12,14 +12,16 @@ import cv2
 
 from .config import OCR_CONFIG, TESSERACT_CONFIG, get_tesseract_path, ERROR_MESSAGES
 from .utils.logger import get_logger
+from .utils.language_detector import LanguageTextSplitter
 
 logger = get_logger(__name__)
 
 
 class OCRResult:
-    """Container for OCR results with confidence metrics."""
+    """Container for OCR results with confidence metrics and language splitting."""
     
-    def __init__(self, text: str, confidence: float, page_num: int, bbox: Optional[Dict] = None):
+    def __init__(self, text: str, confidence: float, page_num: int, bbox: Optional[Dict] = None, 
+                 enable_language_splitting: bool = True):
         """
         Initialize OCR result.
         
@@ -28,12 +30,35 @@ class OCRResult:
             confidence: OCR confidence score (0-100)
             page_num: Page number (1-indexed)
             bbox: Bounding box coordinates
+            enable_language_splitting: Whether to enable language splitting
         """
         self.text = text
         self.confidence = confidence
         self.page_num = page_num
         self.bbox = bbox or {}
         self.word_data = []
+        
+        # Language-specific text versions
+        self.ukrainian_text = ""
+        self.english_text = ""
+        self.language_stats = {}
+        
+        # Initialize language splitting if text is present and enabled
+        if text and enable_language_splitting:
+            self._split_text_by_language()
+    
+    def _split_text_by_language(self):
+        """Split text into Ukrainian and English versions."""
+        try:
+            splitter = LanguageTextSplitter()
+            self.ukrainian_text, self.english_text = splitter.split_text_by_language(self.text)
+            self.language_stats = splitter.get_language_statistics(self.text)
+            logger.debug(f"Page {self.page_num}: Split text into UK({len(self.ukrainian_text)} chars) and EN({len(self.english_text)} chars)")
+        except Exception as e:
+            logger.warning(f"Language splitting failed for page {self.page_num}: {e}")
+            self.ukrainian_text = ""
+            self.english_text = ""
+            self.language_stats = {}
     
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
@@ -44,17 +69,21 @@ class OCRResult:
             'bbox': self.bbox,
             'word_count': len(self.text.split()),
             'char_count': len(self.text),
-            'word_data': self.word_data
+            'word_data': self.word_data,
+            'ukrainian_text': self.ukrainian_text,
+            'english_text': self.english_text,
+            'language_stats': self.language_stats
         }
 
 
 class UkrainianOCR:
     """OCR processor with Ukrainian language support."""
     
-    def __init__(self):
+    def __init__(self, enable_language_splitting: bool = True):
         """Initialize OCR processor."""
         self.setup_tesseract()
         self.confidence_threshold = OCR_CONFIG['confidence_threshold']
+        self.enable_language_splitting = enable_language_splitting
         
     def setup_tesseract(self):
         """Set up Tesseract configuration."""
@@ -159,7 +188,7 @@ class UkrainianOCR:
                     word_data.append(word_info)
             
             # Create result
-            result = OCRResult(text.strip(), avg_confidence, page_num)
+            result = OCRResult(text.strip(), avg_confidence, page_num, enable_language_splitting=self.enable_language_splitting)
             result.word_data = word_data
             
             # Log confidence information
@@ -173,7 +202,7 @@ class UkrainianOCR:
         except Exception as e:
             logger.error(ERROR_MESSAGES['ocr_failed'].format(page_num))
             logger.error(f"OCR error details: {e}")
-            return OCRResult("", 0, page_num)
+            return OCRResult("", 0, page_num, enable_language_splitting=self.enable_language_splitting)
     
     def extract_text_batch(self, images: List[np.ndarray]) -> List[OCRResult]:
         """
@@ -198,7 +227,7 @@ class UkrainianOCR:
                 
             except Exception as e:
                 logger.error(f"Failed to process page {page_num}: {e}")
-                results.append(OCRResult("", 0, page_num))
+                results.append(OCRResult("", 0, page_num, enable_language_splitting=self.enable_language_splitting))
         
         # Log summary
         successful_pages = len([r for r in results if r.confidence > 0])
@@ -283,7 +312,7 @@ class UkrainianOCR:
     
     def save_results(self, results: List[OCRResult], output_dir: Path, filename_prefix: str = 'ocr_result'):
         """
-        Save OCR results to files.
+        Save OCR results to files with language separation.
         
         Args:
             results: List of OCR results
@@ -292,22 +321,44 @@ class UkrainianOCR:
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save individual page results
+        # Collect Ukrainian and English text separately
+        ukrainian_pages = []
+        english_pages = []
+        combined_ukrainian_text = []
+        combined_english_text = []
+        
+        # Save individual page results and collect combined text
         for result in results:
             if result.text:
-                # Save as text file
+                # Save original text file
                 text_file = output_dir / f"{filename_prefix}_page_{result.page_num:03d}.txt"
                 with open(text_file, 'w', encoding='utf-8') as f:
                     f.write(result.text)
                 
-                # Save as JSON with metadata
+                # Save Ukrainian version if present
+                if result.ukrainian_text:
+                    uk_file = output_dir / f"{filename_prefix}_page_{result.page_num:03d}_uk.txt"
+                    with open(uk_file, 'w', encoding='utf-8') as f:
+                        f.write(result.ukrainian_text)
+                    ukrainian_pages.append(result.page_num)
+                    combined_ukrainian_text.append(f"--- Page {result.page_num} ---\n\n{result.ukrainian_text}")
+                
+                # Save English version if present
+                if result.english_text:
+                    en_file = output_dir / f"{filename_prefix}_page_{result.page_num:03d}_en.txt"
+                    with open(en_file, 'w', encoding='utf-8') as f:
+                        f.write(result.english_text)
+                    english_pages.append(result.page_num)
+                    combined_english_text.append(f"--- Page {result.page_num} ---\n\n{result.english_text}")
+                
+                # Save as JSON with metadata including language data
                 json_file = output_dir / f"{filename_prefix}_page_{result.page_num:03d}.json"
                 with open(json_file, 'w', encoding='utf-8') as f:
                     json.dump(result.to_dict(), f, ensure_ascii=False, indent=2)
                 
                 logger.debug(f"Saved OCR results for page {result.page_num}")
         
-        # Save combined results
+        # Save combined results - Original
         combined_text = "\n\n--- Page {} ---\n\n".join([
             result.text for result in results if result.text
         ])
@@ -317,7 +368,30 @@ class UkrainianOCR:
             with open(combined_file, 'w', encoding='utf-8') as f:
                 f.write(combined_text)
         
-        # Save summary report
+        # Save combined Ukrainian results
+        if combined_ukrainian_text:
+            uk_combined_file = output_dir / f"{filename_prefix}_combined_uk.txt"
+            with open(uk_combined_file, 'w', encoding='utf-8') as f:
+                f.write("\n\n".join(combined_ukrainian_text))
+            logger.info(f"Saved Ukrainian text from {len(ukrainian_pages)} pages")
+        
+        # Save combined English results
+        if combined_english_text:
+            en_combined_file = output_dir / f"{filename_prefix}_combined_en.txt"
+            with open(en_combined_file, 'w', encoding='utf-8') as f:
+                f.write("\n\n".join(combined_english_text))
+            logger.info(f"Saved English text from {len(english_pages)} pages")
+        
+        # Create language-specific JSON files
+        self._save_language_specific_json(results, output_dir, filename_prefix, 'uk')
+        self._save_language_specific_json(results, output_dir, filename_prefix, 'en')
+        
+        # Save summary report with language statistics
+        total_uk_chars = sum([len(r.ukrainian_text) for r in results])
+        total_en_chars = sum([len(r.english_text) for r in results])
+        total_uk_words = sum([len(r.ukrainian_text.split()) for r in results if r.ukrainian_text])
+        total_en_words = sum([len(r.english_text.split()) for r in results if r.english_text])
+        
         summary = {
             'total_pages': len(results),
             'successful_pages': len([r for r in results if r.confidence > 0]),
@@ -325,7 +399,16 @@ class UkrainianOCR:
             'low_confidence_pages': [r.page_num for r in results if 0 < r.confidence < self.confidence_threshold],
             'failed_pages': [r.page_num for r in results if r.confidence == 0],
             'total_characters': sum([len(r.text) for r in results]),
-            'total_words': sum([len(r.text.split()) for r in results])
+            'total_words': sum([len(r.text.split()) for r in results]),
+            'language_breakdown': {
+                'ukrainian_pages': ukrainian_pages,
+                'english_pages': english_pages,
+                'ukrainian_characters': total_uk_chars,
+                'english_characters': total_en_chars,
+                'ukrainian_words': total_uk_words,
+                'english_words': total_en_words,
+                'language_stats_per_page': [r.language_stats for r in results if r.language_stats]
+            }
         }
         
         summary_file = output_dir / f"{filename_prefix}_summary.json"
@@ -333,4 +416,45 @@ class UkrainianOCR:
             json.dump(summary, f, ensure_ascii=False, indent=2)
         
         logger.info(f"Saved OCR results to {output_dir}")
-        logger.info(f"Summary: {summary['successful_pages']}/{summary['total_pages']} pages processed successfully") 
+        logger.info(f"Summary: {summary['successful_pages']}/{summary['total_pages']} pages processed successfully")
+        logger.info(f"Language breakdown: {len(ukrainian_pages)} Ukrainian pages, {len(english_pages)} English pages")
+    
+    def _save_language_specific_json(self, results: List[OCRResult], output_dir: Path, 
+                                   filename_prefix: str, language: str):
+        """
+        Save language-specific JSON file with only text from specified language.
+        
+        Args:
+            results: List of OCR results
+            output_dir: Output directory
+            filename_prefix: Prefix for output files
+            language: Language code ('uk' or 'en')
+        """
+        language_results = []
+        
+        for result in results:
+            if language == 'uk' and result.ukrainian_text:
+                lang_result = {
+                    'page_num': result.page_num,
+                    'text': result.ukrainian_text,
+                    'confidence': result.confidence,
+                    'word_count': len(result.ukrainian_text.split()),
+                    'char_count': len(result.ukrainian_text),
+                    'language_stats': result.language_stats
+                }
+                language_results.append(lang_result)
+            elif language == 'en' and result.english_text:
+                lang_result = {
+                    'page_num': result.page_num,
+                    'text': result.english_text,
+                    'confidence': result.confidence,
+                    'word_count': len(result.english_text.split()),
+                    'char_count': len(result.english_text),
+                    'language_stats': result.language_stats
+                }
+                language_results.append(lang_result)
+        
+        if language_results:
+            lang_file = output_dir / f"{filename_prefix}_combined_{language}.json"
+            with open(lang_file, 'w', encoding='utf-8') as f:
+                json.dump(language_results, f, ensure_ascii=False, indent=2) 

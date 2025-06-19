@@ -15,14 +15,16 @@ import cv2
 
 from .config import TABLE_CONFIG, OUTPUT_CONFIG, ERROR_MESSAGES
 from .utils.logger import get_logger
+from .utils.language_detector import LanguageTextSplitter
 
 logger = get_logger(__name__)
 
 
 class TableResult:
-    """Container for table extraction results."""
+    """Container for table extraction results with language separation."""
     
-    def __init__(self, data: pd.DataFrame, page_num: int, table_num: int, confidence: float = 0.0):
+    def __init__(self, data: pd.DataFrame, page_num: int, table_num: int, confidence: float = 0.0,
+                 enable_language_splitting: bool = True):
         """
         Initialize table result.
         
@@ -31,6 +33,7 @@ class TableResult:
             page_num: Page number (1-indexed)
             table_num: Table number on page (1-indexed)
             confidence: Extraction confidence score
+            enable_language_splitting: Whether to enable language splitting
         """
         self.data = data
         self.page_num = page_num
@@ -38,6 +41,77 @@ class TableResult:
         self.confidence = confidence
         self.bbox = {}
         self.metadata = {}
+        
+        # Language-specific versions
+        self.ukrainian_data = pd.DataFrame()
+        self.english_data = pd.DataFrame()
+        self.language_stats = {}
+        
+        # Initialize language splitting if data is present and enabled
+        if not data.empty and enable_language_splitting:
+            self._split_table_by_language()
+    
+    def _split_table_by_language(self):
+        """Split table data by language."""
+        try:
+            splitter = LanguageTextSplitter()
+            
+            # Create copies of the original table structure
+            self.ukrainian_data = self.data.copy()
+            self.english_data = self.data.copy()
+            
+            # Process each cell in the table
+            for col in self.data.columns:
+                ukrainian_col = []
+                english_col = []
+                
+                for idx, cell_value in self.data[col].items():
+                    if pd.isna(cell_value) or str(cell_value).strip() == '':
+                        ukrainian_col.append('')
+                        english_col.append('')
+                        continue
+                    
+                    # Split cell content by language
+                    cell_text = str(cell_value)
+                    uk_text, en_text = splitter.split_text_by_language(cell_text)
+                    
+                    ukrainian_col.append(uk_text)
+                    english_col.append(en_text)
+                
+                # Update language-specific tables
+                self.ukrainian_data[col] = ukrainian_col
+                self.english_data[col] = english_col
+            
+            # Remove completely empty rows from language-specific tables
+            self.ukrainian_data = self.ukrainian_data.loc[
+                ~(self.ukrainian_data == '').all(axis=1)
+            ]
+            self.english_data = self.english_data.loc[
+                ~(self.english_data == '').all(axis=1)
+            ]
+            
+            # Calculate statistics
+            total_cells = self.data.size
+            uk_cells = sum(1 for col in self.ukrainian_data.columns 
+                          for val in self.ukrainian_data[col] if str(val).strip())
+            en_cells = sum(1 for col in self.english_data.columns 
+                          for val in self.english_data[col] if str(val).strip())
+            
+            self.language_stats = {
+                'total_cells': total_cells,
+                'ukrainian_cells': uk_cells,
+                'english_cells': en_cells,
+                'ukrainian_rows': len(self.ukrainian_data),
+                'english_rows': len(self.english_data)
+            }
+            
+            logger.debug(f"Table {self.table_num} page {self.page_num}: Language split completed")
+            
+        except Exception as e:
+            logger.warning(f"Language splitting failed for table {self.table_num} on page {self.page_num}: {e}")
+            self.ukrainian_data = pd.DataFrame()
+            self.english_data = pd.DataFrame()
+            self.language_stats = {}
     
     def to_dict(self) -> Dict:
         """Convert to dictionary."""
@@ -49,7 +123,10 @@ class TableResult:
             'columns': list(self.data.columns),
             'data': self.data.to_dict('records'),
             'bbox': self.bbox,
-            'metadata': self.metadata
+            'metadata': self.metadata,
+            'ukrainian_data': self.ukrainian_data.to_dict('records') if not self.ukrainian_data.empty else [],
+            'english_data': self.english_data.to_dict('records') if not self.english_data.empty else [],
+            'language_stats': self.language_stats
         }
     
     def is_valid(self) -> bool:
@@ -60,10 +137,11 @@ class TableResult:
 class TableExtractor:
     """Table detection and extraction processor."""
     
-    def __init__(self):
+    def __init__(self, enable_language_splitting: bool = True):
         """Initialize table extractor."""
         self.method = TABLE_CONFIG['detection_method']
         self.camelot_flavor = TABLE_CONFIG['camelot_flavor']
+        self.enable_language_splitting = enable_language_splitting
         
     def detect_tables_camelot(self, pdf_path: Path, pages: str = 'all') -> List[TableResult]:
         """
@@ -110,7 +188,8 @@ class TableExtractor:
                         data=df,
                         page_num=table.page,
                         table_num=i + 1,
-                        confidence=table.accuracy if hasattr(table, 'accuracy') else 0.0
+                        confidence=table.accuracy if hasattr(table, 'accuracy') else 0.0,
+                        enable_language_splitting=self.enable_language_splitting
                     )
                     
                     # Add metadata
@@ -180,7 +259,8 @@ class TableExtractor:
                         data=df,
                         page_num=1,  # Default, would need additional processing to get actual page
                         table_num=i + 1,
-                        confidence=0.0  # Tabula doesn't provide confidence scores
+                        confidence=0.0,  # Tabula doesn't provide confidence scores
+                        enable_language_splitting=self.enable_language_splitting
                     )
                     
                     result.metadata = {
@@ -289,7 +369,8 @@ class TableExtractor:
                                     data=df,
                                     page_num=page_num,
                                     table_num=i + 1,
-                                    confidence=0.5  # Default confidence for image-based detection
+                                    confidence=0.5,  # Default confidence for image-based detection
+                                    enable_language_splitting=self.enable_language_splitting
                                 )
                                 
                                 result.bbox = {'x': x, 'y': y, 'width': w, 'height': h}
@@ -363,7 +444,7 @@ class TableExtractor:
     
     def save_tables(self, tables: List[TableResult], output_dir: Path, filename_prefix: str = 'table'):
         """
-        Save extracted tables to files.
+        Save extracted tables to files with language separation.
         
         Args:
             tables: List of table results
@@ -373,6 +454,8 @@ class TableExtractor:
         output_dir.mkdir(parents=True, exist_ok=True)
         
         saved_files = []
+        ukrainian_tables_count = 0
+        english_tables_count = 0
         
         for table in tables:
             if not table.is_valid():
@@ -380,35 +463,107 @@ class TableExtractor:
             
             base_name = f"{filename_prefix}_page_{table.page_num:03d}_table_{table.table_num:03d}"
             
-            # Save as CSV
+            # Save original table
             if 'csv' in OUTPUT_CONFIG['table_formats']:
                 csv_file = output_dir / f"{base_name}.csv"
                 table.data.to_csv(csv_file, index=False, encoding='utf-8')
                 saved_files.append(csv_file)
-                logger.debug(f"Saved table as CSV: {csv_file}")
+                logger.debug(f"Saved original table as CSV: {csv_file}")
             
-            # Save as JSON
             if 'json' in OUTPUT_CONFIG['table_formats']:
                 json_file = output_dir / f"{base_name}.json"
                 with open(json_file, 'w', encoding='utf-8') as f:
                     json.dump(table.to_dict(), f, ensure_ascii=False, indent=2)
                 saved_files.append(json_file)
-                logger.debug(f"Saved table as JSON: {json_file}")
+                logger.debug(f"Saved original table as JSON: {json_file}")
             
-            # Save as Excel
             if 'xlsx' in OUTPUT_CONFIG['table_formats']:
                 xlsx_file = output_dir / f"{base_name}.xlsx"
                 table.data.to_excel(xlsx_file, index=False, engine='openpyxl')
                 saved_files.append(xlsx_file)
-                logger.debug(f"Saved table as Excel: {xlsx_file}")
+                logger.debug(f"Saved original table as Excel: {xlsx_file}")
+            
+            # Save Ukrainian version if present
+            if not table.ukrainian_data.empty:
+                ukrainian_tables_count += 1
+                
+                if 'csv' in OUTPUT_CONFIG['table_formats']:
+                    uk_csv_file = output_dir / f"{base_name}_uk.csv"
+                    table.ukrainian_data.to_csv(uk_csv_file, index=False, encoding='utf-8')
+                    saved_files.append(uk_csv_file)
+                    logger.debug(f"Saved Ukrainian table as CSV: {uk_csv_file}")
+                
+                if 'json' in OUTPUT_CONFIG['table_formats']:
+                    uk_json_file = output_dir / f"{base_name}_uk.json"
+                    uk_data = {
+                        'page_num': table.page_num,
+                        'table_num': table.table_num,
+                        'confidence': table.confidence,
+                        'shape': table.ukrainian_data.shape,
+                        'columns': list(table.ukrainian_data.columns),
+                        'data': table.ukrainian_data.to_dict('records'),
+                        'language_stats': table.language_stats,
+                        'metadata': {**table.metadata, 'language': 'ukrainian'}
+                    }
+                    with open(uk_json_file, 'w', encoding='utf-8') as f:
+                        json.dump(uk_data, f, ensure_ascii=False, indent=2)
+                    saved_files.append(uk_json_file)
+                    logger.debug(f"Saved Ukrainian table as JSON: {uk_json_file}")
+                
+                if 'xlsx' in OUTPUT_CONFIG['table_formats']:
+                    uk_xlsx_file = output_dir / f"{base_name}_uk.xlsx"
+                    table.ukrainian_data.to_excel(uk_xlsx_file, index=False, engine='openpyxl')
+                    saved_files.append(uk_xlsx_file)
+                    logger.debug(f"Saved Ukrainian table as Excel: {uk_xlsx_file}")
+            
+            # Save English version if present
+            if not table.english_data.empty:
+                english_tables_count += 1
+                
+                if 'csv' in OUTPUT_CONFIG['table_formats']:
+                    en_csv_file = output_dir / f"{base_name}_en.csv"
+                    table.english_data.to_csv(en_csv_file, index=False, encoding='utf-8')
+                    saved_files.append(en_csv_file)
+                    logger.debug(f"Saved English table as CSV: {en_csv_file}")
+                
+                if 'json' in OUTPUT_CONFIG['table_formats']:
+                    en_json_file = output_dir / f"{base_name}_en.json"
+                    en_data = {
+                        'page_num': table.page_num,
+                        'table_num': table.table_num,
+                        'confidence': table.confidence,
+                        'shape': table.english_data.shape,
+                        'columns': list(table.english_data.columns),
+                        'data': table.english_data.to_dict('records'),
+                        'language_stats': table.language_stats,
+                        'metadata': {**table.metadata, 'language': 'english'}
+                    }
+                    with open(en_json_file, 'w', encoding='utf-8') as f:
+                        json.dump(en_data, f, ensure_ascii=False, indent=2)
+                    saved_files.append(en_json_file)
+                    logger.debug(f"Saved English table as JSON: {en_json_file}")
+                
+                if 'xlsx' in OUTPUT_CONFIG['table_formats']:
+                    en_xlsx_file = output_dir / f"{base_name}_en.xlsx"
+                    table.english_data.to_excel(en_xlsx_file, index=False, engine='openpyxl')
+                    saved_files.append(en_xlsx_file)
+                    logger.debug(f"Saved English table as Excel: {en_xlsx_file}")
         
-        # Save summary
+        # Save summary with language statistics
+        language_stats = {
+            'ukrainian_cells': sum(t.language_stats.get('ukrainian_cells', 0) for t in tables),
+            'english_cells': sum(t.language_stats.get('english_cells', 0) for t in tables),
+            'ukrainian_tables': ukrainian_tables_count,
+            'english_tables': english_tables_count
+        }
+        
         summary = {
             'total_tables': len(tables),
             'valid_tables': len([t for t in tables if t.is_valid()]),
             'tables_by_page': {},
             'extraction_methods': list(set([t.metadata.get('extraction_method', 'unknown') for t in tables])),
-            'saved_files': [str(f) for f in saved_files]
+            'saved_files': [str(f) for f in saved_files],
+            'language_breakdown': language_stats
         }
         
         # Group tables by page
@@ -424,6 +579,7 @@ class TableExtractor:
         
         logger.info(f"Saved {len(saved_files)} table files to {output_dir}")
         logger.info(f"Summary: {summary['valid_tables']}/{summary['total_tables']} tables extracted successfully")
+        logger.info(f"Language breakdown: {ukrainian_tables_count} Ukrainian tables, {english_tables_count} English tables")
     
     def extract_tables(self, pdf_path: Optional[Path] = None, images: Optional[List[np.ndarray]] = None) -> List[TableResult]:
         """
