@@ -1,0 +1,14 @@
+
+# IDE
+.vscode/
+
+# Application specific
+output/
+input/
+temp/
+logs/
+*.log
+
+# Large files and test data
+*.pdf
+

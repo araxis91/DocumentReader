@@ -1,0 +1,14 @@
+pdf2image>=1.16.0
+pytesseract>=0.3.10
+opencv-python>=4.8.0
+pandas>=2.2.0
+tabula-py>=2.8.0
+PyMuPDF>=1.23.0
+Pillow>=10.0.0
+click>=8.1.0
+openpyxl>=3.1.0
+lxml>=4.9.0
+streamlit>=1.28.0
+tqdm>=4.66.0
+# Note: camelot-py may have compatibility issues with Python 3.13
+# We'll install it separately if needed 
