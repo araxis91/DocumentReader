@@ -145,6 +145,15 @@ class DocumentProcessor:
         successful = len([r for r in results if r['success']])
         failed = len(results) - successful
         
+        # Calculate aggregate statistics for successful files
+        successful_results = [r for r in results if r['success']]
+        if successful_results:
+            total_pages = sum(r['pages_processed'] for r in successful_results)
+            total_characters = sum(r['ocr_results']['total_characters'] for r in successful_results)
+            total_words = sum(r['ocr_results']['total_words'] for r in successful_results)
+            total_tables = sum(r['table_results']['tables_found'] for r in successful_results)
+            avg_confidence = sum(r['ocr_results']['average_confidence'] for r in successful_results) / len(successful_results)
+        
         self.logger.info(f"Batch processing completed: {successful} successful, {failed} failed")
         
         return results
@@ -204,6 +213,8 @@ def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshol
             click.echo(click.style("✓ Processing completed successfully!", fg='green'))
             click.echo(f"  Pages processed: {result['pages_processed']}")
             click.echo(f"  OCR confidence: {result['ocr_results']['average_confidence']:.1f}%")
+            click.echo(f"  Total characters: {result['ocr_results']['total_characters']:,}")
+            click.echo(f"  Total words: {result['ocr_results']['total_words']:,}")
             click.echo(f"  Tables found: {result['table_results']['tables_found']}")
             click.echo(f"  Processing time: {result['processing_time']:.2f}s")
             click.echo(f"  Results saved to: {result['output_directory']}")
@@ -264,9 +275,26 @@ def batch(ctx, input_dir, output, pattern, recursive, table_method, confidence_t
         successful = len([r for r in results if r['success']])
         failed = len(results) - successful
         
+        # Calculate aggregate statistics for successful files
+        successful_results = [r for r in results if r['success']]
+        if successful_results:
+            total_pages = sum(r['pages_processed'] for r in successful_results)
+            total_characters = sum(r['ocr_results']['total_characters'] for r in successful_results)
+            total_words = sum(r['ocr_results']['total_words'] for r in successful_results)
+            total_tables = sum(r['table_results']['tables_found'] for r in successful_results)
+            avg_confidence = sum(r['ocr_results']['average_confidence'] for r in successful_results) / len(successful_results)
+        
         click.echo(f"\nBatch processing completed:")
         click.echo(f"  {click.style(str(successful), fg='green')} successful")
         click.echo(f"  {click.style(str(failed), fg='red')} failed")
+        
+        if successful_results:
+            click.echo(f"\nAggregate statistics:")
+            click.echo(f"  Total pages processed: {total_pages}")
+            click.echo(f"  Average OCR confidence: {avg_confidence:.1f}%")
+            click.echo(f"  Total characters extracted: {total_characters:,}")
+            click.echo(f"  Total words extracted: {total_words:,}")
+            click.echo(f"  Total tables found: {total_tables}")
         
         if failed > 0:
             click.echo(f"\nFailed files:")
