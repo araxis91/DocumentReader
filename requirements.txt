@@ -12,4 +12,5 @@ lxml==4.9.3
 ghostscript==0.7
 streamlit==1.28.2
 tqdm==4.66.1
-langdetect==1.0.9 
+langdetect==1.0.9
+markitdown>=0.0.1 

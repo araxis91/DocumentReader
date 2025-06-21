@@ -310,14 +310,16 @@ class UkrainianOCR:
             logger.warning(f"Orientation correction failed: {e}")
             return image
     
-    def save_results(self, results: List[OCRResult], output_dir: Path, filename_prefix: str = 'ocr_result'):
+    def save_results(self, results: List[OCRResult], output_dir: Path, filename_prefix: str = 'ocr_result',
+                   enable_markdown: bool = True):
         """
-        Save OCR results to files with language separation.
+        Save OCR results to files with language separation and markdown output.
         
         Args:
             results: List of OCR results
             output_dir: Output directory
             filename_prefix: Prefix for output files
+            enable_markdown: Whether to generate markdown output
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -385,6 +387,10 @@ class UkrainianOCR:
         # Create language-specific JSON files
         self._save_language_specific_json(results, output_dir, filename_prefix, 'uk')
         self._save_language_specific_json(results, output_dir, filename_prefix, 'en')
+        
+        # Generate markdown output if enabled
+        if enable_markdown:
+            self._save_markdown_results(results, output_dir, filename_prefix)
         
         # Save summary report with language statistics
         total_uk_chars = sum([len(r.ukrainian_text) for r in results])
@@ -457,4 +463,68 @@ class UkrainianOCR:
         if language_results:
             lang_file = output_dir / f"{filename_prefix}_combined_{language}.json"
             with open(lang_file, 'w', encoding='utf-8') as f:
-                json.dump(language_results, f, ensure_ascii=False, indent=2) 
+                json.dump(language_results, f, ensure_ascii=False, indent=2)
+    
+    def _save_markdown_results(self, results: List[OCRResult], output_dir: Path, filename_prefix: str):
+        """
+        Save OCR results in markdown format.
+        
+        Args:
+            results: List of OCR results
+            output_dir: Output directory
+            filename_prefix: Prefix for output files
+        """
+        try:
+            from src.utils.markdown_converter import create_markdown_converter
+            
+            converter = create_markdown_converter()
+            
+            # Generate comprehensive markdown document
+            document_title = f"OCR Analysis Results - {output_dir.name}"
+            markdown_content = converter.create_document_markdown(
+                results, [], document_title, include_metadata=True
+            )
+            
+            if markdown_content:
+                markdown_file = output_dir / f"{filename_prefix}_combined.md"
+                with open(markdown_file, 'w', encoding='utf-8') as f:
+                    f.write(markdown_content)
+                logger.info(f"Saved combined markdown: {markdown_file}")
+            
+            # Generate language-specific markdown documents
+            if any(hasattr(r, 'ukrainian_text') and r.ukrainian_text for r in results):
+                uk_markdown = converter.create_language_specific_markdown(
+                    results, [], 'uk', document_title
+                )
+                if uk_markdown:
+                    uk_markdown_file = output_dir / f"{filename_prefix}_combined_uk.md"
+                    with open(uk_markdown_file, 'w', encoding='utf-8') as f:
+                        f.write(uk_markdown)
+                    logger.info(f"Saved Ukrainian markdown: {uk_markdown_file}")
+            
+            if any(hasattr(r, 'english_text') and r.english_text for r in results):
+                en_markdown = converter.create_language_specific_markdown(
+                    results, [], 'en', document_title
+                )
+                if en_markdown:
+                    en_markdown_file = output_dir / f"{filename_prefix}_combined_en.md"
+                    with open(en_markdown_file, 'w', encoding='utf-8') as f:
+                        f.write(en_markdown)
+                    logger.info(f"Saved English markdown: {en_markdown_file}")
+            
+            # Generate individual page markdown files
+            for result in results:
+                if result.text:
+                    page_markdown = converter.convert_text_to_markdown(
+                        result.text, f"Page {result.page_num} Analysis", result.page_num
+                    )
+                    if page_markdown:
+                        page_md_file = output_dir / f"{filename_prefix}_page_{result.page_num:03d}.md"
+                        with open(page_md_file, 'w', encoding='utf-8') as f:
+                            f.write(page_markdown)
+                        logger.debug(f"Saved page {result.page_num} markdown: {page_md_file}")
+            
+        except ImportError:
+            logger.warning("Markdown converter not available. Install markitdown: pip install markitdown")
+        except Exception as e:
+            logger.error(f"Failed to generate markdown output: {e}") 

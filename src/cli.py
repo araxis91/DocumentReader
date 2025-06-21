@@ -19,7 +19,8 @@ from .utils.logger import setup_logger, main_logger
 class DocumentProcessor:
     """Main document processing orchestrator."""
     
-    def __init__(self, output_dir: Path, verbose: bool = False, enable_language_splitting: bool = True):
+    def __init__(self, output_dir: Path, verbose: bool = False, enable_language_splitting: bool = True,
+                 enable_markdown: bool = True, enable_markitdown_fallback: bool = False):
         """
         Initialize document processor.
         
@@ -27,10 +28,14 @@ class DocumentProcessor:
             output_dir: Output directory for results
             verbose: Enable verbose logging
             enable_language_splitting: Enable language splitting
+            enable_markdown: Enable markdown output generation
+            enable_markitdown_fallback: Enable markitdown fallback for PDF conversion
         """
         self.output_dir = output_dir
         self.verbose = verbose
         self.enable_language_splitting = enable_language_splitting
+        self.enable_markdown = enable_markdown
+        self.enable_markitdown_fallback = enable_markitdown_fallback
         
         # Initialize processors
         self.pdf_processor = PDFProcessor()
@@ -77,7 +82,8 @@ class DocumentProcessor:
             ocr_results = self.ocr_processor.extract_text_batch(images)
             
             # Save OCR results
-            self.ocr_processor.save_results(ocr_results, file_output_dir, 'ocr_results')
+            self.ocr_processor.save_results(ocr_results, file_output_dir, 'ocr_results', 
+                                           enable_markdown=self.enable_markdown)
             
             # Step 3: Extract tables
             self.logger.info("Step 3: Extracting tables")
@@ -85,7 +91,17 @@ class DocumentProcessor:
             
             # Save table results
             if table_results:
-                self.table_extractor.save_tables(table_results, file_output_dir, 'tables')
+                self.table_extractor.save_tables(table_results, file_output_dir, 'tables',
+                                                enable_markdown=self.enable_markdown)
+            
+            # Step 4: Generate comprehensive markdown document (if enabled)
+            if self.enable_markdown and (ocr_results or table_results):
+                self._generate_comprehensive_markdown(ocr_results, table_results, file_output_dir, pdf_path)
+            
+            # Step 5: Try markitdown fallback if enabled
+            markitdown_result = None
+            if self.enable_markitdown_fallback:
+                markitdown_result = self._try_markitdown_conversion(pdf_path, file_output_dir)
             
             # Generate summary
             processing_time = time.time() - start_time
@@ -159,6 +175,99 @@ class DocumentProcessor:
         self.logger.info(f"Batch processing completed: {successful} successful, {failed} failed")
         
         return results
+    
+    def _generate_comprehensive_markdown(self, ocr_results: List, table_results: List, 
+                                       output_dir: Path, pdf_path: Path):
+        """
+        Generate comprehensive markdown document combining OCR and table results.
+        
+        Args:
+            ocr_results: List of OCR results
+            table_results: List of table results
+            output_dir: Output directory
+            pdf_path: Original PDF path for reference
+        """
+        try:
+            from src.utils.markdown_converter import create_markdown_converter
+            
+            converter = create_markdown_converter()
+            document_title = f"Complete Analysis - {pdf_path.stem}"
+            
+            # Generate comprehensive document
+            markdown_content = converter.create_document_markdown(
+                ocr_results, table_results, document_title, include_metadata=True
+            )
+            
+            if markdown_content:
+                comprehensive_file = output_dir / "complete_analysis.md"
+                with open(comprehensive_file, 'w', encoding='utf-8') as f:
+                    f.write(markdown_content)
+                self.logger.info(f"Generated comprehensive markdown: {comprehensive_file}")
+            
+            # Generate language-specific comprehensive documents
+            if self.enable_language_splitting:
+                # Ukrainian version
+                if any(hasattr(r, 'ukrainian_text') and r.ukrainian_text for r in ocr_results) or \
+                   any(hasattr(t, 'ukrainian_data') and not t.ukrainian_data.empty for t in table_results):
+                    uk_markdown = converter.create_language_specific_markdown(
+                        ocr_results, table_results, 'uk', document_title
+                    )
+                    if uk_markdown:
+                        uk_file = output_dir / "complete_analysis_uk.md"
+                        with open(uk_file, 'w', encoding='utf-8') as f:
+                            f.write(uk_markdown)
+                        self.logger.info(f"Generated Ukrainian comprehensive markdown: {uk_file}")
+                
+                # English version
+                if any(hasattr(r, 'english_text') and r.english_text for r in ocr_results) or \
+                   any(hasattr(t, 'english_data') and not t.english_data.empty for t in table_results):
+                    en_markdown = converter.create_language_specific_markdown(
+                        ocr_results, table_results, 'en', document_title
+                    )
+                    if en_markdown:
+                        en_file = output_dir / "complete_analysis_en.md"
+                        with open(en_file, 'w', encoding='utf-8') as f:
+                            f.write(en_markdown)
+                        self.logger.info(f"Generated English comprehensive markdown: {en_file}")
+                        
+        except ImportError:
+            self.logger.warning("Markdown converter not available. Install markitdown: pip install markitdown")
+        except Exception as e:
+            self.logger.error(f"Failed to generate comprehensive markdown: {e}")
+    
+    def _try_markitdown_conversion(self, pdf_path: Path, output_dir: Path) -> Optional[str]:
+        """
+        Try converting PDF using markitdown as fallback/comparison.
+        
+        Args:
+            pdf_path: Path to PDF file
+            output_dir: Output directory
+            
+        Returns:
+            Markitdown result content or None
+        """
+        try:
+            from src.utils.markdown_converter import create_markdown_converter
+            
+            converter = create_markdown_converter()
+            markitdown_content = converter.convert_pdf_with_markitdown(pdf_path)
+            
+            if markitdown_content:
+                markitdown_file = output_dir / "markitdown_conversion.md"
+                with open(markitdown_file, 'w', encoding='utf-8') as f:
+                    f.write(markitdown_content)
+                self.logger.info(f"Generated markitdown conversion: {markitdown_file}")
+                return markitdown_content
+            else:
+                self.logger.warning("Markitdown conversion returned no content")
+                return None
+                
+        except ImportError:
+            self.logger.warning("Markitdown not available for PDF conversion")
+            return None
+        except Exception as e:
+            self.logger.error(f"Markitdown conversion failed: {e}")
+            return None
 
 
 @click.group()
@@ -191,11 +300,17 @@ def cli(ctx, verbose):
               help='Minimum OCR confidence threshold (0-100)')
 @click.option('--disable-language-splitting', is_flag=True,
               help='Disable automatic language splitting of extracted text')
+@click.option('--disable-markdown', is_flag=True,
+              help='Disable markdown output generation')
+@click.option('--enable-markitdown-fallback', is_flag=True,
+              help='Enable markitdown fallback for PDF conversion comparison')
 @click.pass_context
-def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshold, disable_language_splitting):
+def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshold, 
+           disable_language_splitting, disable_markdown, enable_markitdown_fallback):
     """
     Process a single PDF file to extract text and tables.
     Creates separate Ukrainian and English output files unless --disable-language-splitting is used.
+    Generates markdown output unless --disable-markdown is used.
     
     PDF_FILE: Path to the PDF file to process
     """
@@ -207,14 +322,29 @@ def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshol
     TABLE_CONFIG['detection_method'] = table_method
     
     try:
-        processor = DocumentProcessor(output, verbose, enable_language_splitting=not disable_language_splitting)
+        processor = DocumentProcessor(
+            output, 
+            verbose, 
+            enable_language_splitting=not disable_language_splitting,
+            enable_markdown=not disable_markdown,
+            enable_markitdown_fallback=enable_markitdown_fallback
+        )
         
         click.echo(f"Processing: {pdf_file}")
         click.echo(f"Output directory: {output}")
+        
         if not disable_language_splitting:
             click.echo("Language splitting: Enabled (Ukrainian and English files will be created)")
         else:
             click.echo("Language splitting: Disabled")
+            
+        if not disable_markdown:
+            click.echo("Markdown output: Enabled (.md files will be created)")
+        else:
+            click.echo("Markdown output: Disabled")
+            
+        if enable_markitdown_fallback:
+            click.echo("Markitdown fallback: Enabled (alternative PDF conversion will be attempted)")
         
         result = processor.process_single_file(pdf_file)
         
@@ -248,20 +378,25 @@ def process(ctx, pdf_file, output, pdf_method, table_method, confidence_threshol
 @click.argument('input_dir', type=click.Path(exists=True, path_type=Path))
 @click.option('--output', '-o', type=click.Path(path_type=Path), default='./output',
               help='Output directory for results')
-@click.option('--pattern', '-p', default='*.pdf',
-              help='File pattern to match (default: *.pdf)')
-@click.option('--recursive', '-r', is_flag=True,
-              help='Search recursively in subdirectories')
+@click.option('--pdf-method', type=click.Choice(['pdf2image', 'pymupdf']), default='pdf2image',
+              help='PDF to image conversion method')
 @click.option('--table-method', type=click.Choice(['camelot', 'tabula']), default='camelot',
               help='Table extraction method')
 @click.option('--confidence-threshold', type=int, default=60,
               help='Minimum OCR confidence threshold (0-100)')
 @click.option('--disable-language-splitting', is_flag=True,
               help='Disable automatic language splitting of extracted text')
+@click.option('--disable-markdown', is_flag=True,
+              help='Disable markdown output generation')
+@click.option('--enable-markitdown-fallback', is_flag=True,
+              help='Enable markitdown fallback for PDF conversion comparison')
 @click.pass_context
-def batch(ctx, input_dir, output, pattern, recursive, table_method, confidence_threshold, disable_language_splitting):
+def batch(ctx, input_dir, output, pdf_method, table_method, confidence_threshold, 
+         disable_language_splitting, disable_markdown, enable_markitdown_fallback):
     """
     Process multiple PDF files in a directory.
+    Creates separate Ukrainian and English output files unless --disable-language-splitting is used.
+    Generates markdown output unless --disable-markdown is used.
     
     INPUT_DIR: Directory containing PDF files to process
     """
@@ -273,21 +408,31 @@ def batch(ctx, input_dir, output, pattern, recursive, table_method, confidence_t
     TABLE_CONFIG['detection_method'] = table_method
     
     try:
-        # Find PDF files
-        if recursive:
-            pdf_files = list(input_dir.rglob(pattern))
-        else:
-            pdf_files = list(input_dir.glob(pattern))
+        processor = DocumentProcessor(
+            output, 
+            verbose, 
+            enable_language_splitting=not disable_language_splitting,
+            enable_markdown=not disable_markdown,
+            enable_markitdown_fallback=enable_markitdown_fallback
+        )
         
-        if not pdf_files:
-            click.echo(click.style(f"No PDF files found matching pattern '{pattern}'", fg='yellow'))
-            sys.exit(0)
-        
-        click.echo(f"Found {len(pdf_files)} PDF files")
+        click.echo(f"Batch processing directory: {input_dir}")
         click.echo(f"Output directory: {output}")
         
-        processor = DocumentProcessor(output, verbose, enable_language_splitting=not disable_language_splitting)
-        results = processor.process_batch(pdf_files)
+        if not disable_language_splitting:
+            click.echo("Language splitting: Enabled (Ukrainian and English files will be created)")
+        else:
+            click.echo("Language splitting: Disabled")
+            
+        if not disable_markdown:
+            click.echo("Markdown output: Enabled (.md files will be created)")
+        else:
+            click.echo("Markdown output: Disabled")
+            
+        if enable_markitdown_fallback:
+            click.echo("Markitdown fallback: Enabled (alternative PDF conversion will be attempted)")
+        
+        results = processor.process_batch(input_dir)
         
         # Print summary
         successful = len([r for r in results if r['success']])

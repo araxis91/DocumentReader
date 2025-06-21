@@ -442,14 +442,16 @@ class TableExtractor:
         
         return df
     
-    def save_tables(self, tables: List[TableResult], output_dir: Path, filename_prefix: str = 'table'):
+    def save_tables(self, tables: List[TableResult], output_dir: Path, filename_prefix: str = 'table',
+                  enable_markdown: bool = True):
         """
-        Save extracted tables to files with language separation.
+        Save extracted tables to files with language separation and markdown output.
         
         Args:
             tables: List of table results
             output_dir: Output directory
             filename_prefix: Prefix for output files
+            enable_markdown: Whether to generate markdown output
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -549,6 +551,10 @@ class TableExtractor:
                     saved_files.append(en_xlsx_file)
                     logger.debug(f"Saved English table as Excel: {en_xlsx_file}")
         
+        # Generate markdown output if enabled
+        if enable_markdown and tables:
+            self._save_markdown_tables(tables, output_dir, filename_prefix)
+        
         # Save summary with language statistics
         language_stats = {
             'ukrainian_cells': sum(t.language_stats.get('ukrainian_cells', 0) for t in tables),
@@ -580,6 +586,70 @@ class TableExtractor:
         logger.info(f"Saved {len(saved_files)} table files to {output_dir}")
         logger.info(f"Summary: {summary['valid_tables']}/{summary['total_tables']} tables extracted successfully")
         logger.info(f"Language breakdown: {ukrainian_tables_count} Ukrainian tables, {english_tables_count} English tables")
+    
+    def _save_markdown_tables(self, tables: List[TableResult], output_dir: Path, filename_prefix: str):
+        """
+        Save table results in markdown format.
+        
+        Args:
+            tables: List of table results
+            output_dir: Output directory
+            filename_prefix: Prefix for output files
+        """
+        try:
+            from src.utils.markdown_converter import create_markdown_converter
+            
+            converter = create_markdown_converter()
+            
+            # Generate comprehensive markdown document with all tables
+            document_title = f"Table Analysis Results - {output_dir.name}"
+            markdown_content = converter.create_document_markdown(
+                [], tables, document_title, include_metadata=True
+            )
+            
+            if markdown_content:
+                markdown_file = output_dir / f"{filename_prefix}_combined.md"
+                with open(markdown_file, 'w', encoding='utf-8') as f:
+                    f.write(markdown_content)
+                logger.info(f"Saved combined table markdown: {markdown_file}")
+            
+            # Generate language-specific markdown documents
+            if any(hasattr(t, 'ukrainian_data') and not t.ukrainian_data.empty for t in tables):
+                uk_markdown = converter.create_language_specific_markdown(
+                    [], tables, 'uk', document_title
+                )
+                if uk_markdown:
+                    uk_markdown_file = output_dir / f"{filename_prefix}_combined_uk.md"
+                    with open(uk_markdown_file, 'w', encoding='utf-8') as f:
+                        f.write(uk_markdown)
+                    logger.info(f"Saved Ukrainian table markdown: {uk_markdown_file}")
+            
+            if any(hasattr(t, 'english_data') and not t.english_data.empty for t in tables):
+                en_markdown = converter.create_language_specific_markdown(
+                    [], tables, 'en', document_title
+                )
+                if en_markdown:
+                    en_markdown_file = output_dir / f"{filename_prefix}_combined_en.md"
+                    with open(en_markdown_file, 'w', encoding='utf-8') as f:
+                        f.write(en_markdown)
+                    logger.info(f"Saved English table markdown: {en_markdown_file}")
+            
+            # Generate individual table markdown files
+            for table in tables:
+                if table.is_valid():
+                    table_markdown = converter.convert_table_to_markdown(
+                        table.data, f"Table Analysis", table.page_num, table.table_num
+                    )
+                    if table_markdown:
+                        table_md_file = output_dir / f"{filename_prefix}_page_{table.page_num:03d}_table_{table.table_num:03d}.md"
+                        with open(table_md_file, 'w', encoding='utf-8') as f:
+                            f.write(table_markdown)
+                        logger.debug(f"Saved table markdown: {table_md_file}")
+            
+        except ImportError:
+            logger.warning("Markdown converter not available. Install markitdown: pip install markitdown")
+        except Exception as e:
+            logger.error(f"Failed to generate table markdown output: {e}")
     
     def extract_tables(self, pdf_path: Optional[Path] = None, images: Optional[List[np.ndarray]] = None) -> List[TableResult]:
         """
